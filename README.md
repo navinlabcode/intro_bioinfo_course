@@ -9,3 +9,5 @@ In this workshop, students will learn the fundamental steps of single-cell RNA s
 
 📖 Reference: Kumar, T., Nee, K., Wei, R. et al. A spatially resolved single-cell genomic atlas of the adult human breast. Nature 620, 181–191 (2023). https://doi.org/10.1038/s41586-023-06252-9
 
+
+You can view a html rendered version of the Rmd file [here](https://htmlpreview.github.io/?https://github.com/navinlabcode/intro_bioinfo_course/blob/main/Seurat_HBCA_workshop.html).
