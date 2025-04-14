@@ -1,0 +1,275 @@
+---
+title: "Seurat HBCA Workshop"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE} 
+# Hide explicit messages throughout notebook
+knitr::opts_knit$set(root.dir = "~/Downloads")
+```
+
+
+```{r}
+# Load package libraries
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(celldex)
+
+# Set seed for reproducibility
+set.seed(25)
+```
+
+
+```{r start_time, echo=FALSE}
+start_time <- Sys.time()
+```
+## Step 1. Create a Seurat object
+
+Seurat implements a new data type which is named 'Seurat'. It allows Seurat to store all the steps and results along the whole analysis. Therefore, the first step is to read in the data and create a Seurat object. Seurat has an easy solution for data generated using the 10x Genomics platform.
+What the Read10X function does is to read in the matrix and rename its row names and col names by gene symbols and cell barcodes, respectively. Alternatively, one can do this manually, which is probably what one would do when the data is not generated using 10x.
+
+```{r}
+hbca.data <- Read10X(data.dir = "HBCA_85")
+# - 'counts': the gene expression matrix
+# - 'project': project name label
+# - 'min.cells = 3': keep genes detected in ≥ 3 cells
+# - 'min.features = 200': keep cells with ≥ 200 detected genes
+hbca <- CreateSeuratObject(counts = hbca.data, project = "hbca3k", min.cells = 3, min.features = 200)
+# View the Seurat object summary
+hbca
+# Preview the raw expression data for specific genes
+# This shows expression values of COL1A1, JCHAIN, and LUM in the first 30 cells
+hbca.data[c("COL1A1", "JCHAIN", "LUM"), 1:30]
+```
+
+
+## Step 2. Quality control
+After creating the Seurat object, the next step is to do quality control on the data. The most common quality control is to filter out
+Cells with too few genes detected. They usually represent cells which are not sequenced deep enough for reliable characterization.
+Cells with too many genes detected. They may represent doublets or multiplets (i.e. two or more cells in the same droplet, therefore sharing the same cell barcode).
+Cells with high mitochondrial transcript percentage. As most of the scRNA-seq experiments use oligo-T to capture mRNAs, mitochondrial transcripts should be relatively under-representative due to their lack of poly-A tails, but it is unavoidable that some mitochondrial transcripts are captured. Meanwhile, there is also some evidence that stable poly-A tails exist in some mitochondrial transcripts but serve as a marker for degradation (e.g. this paper). Together, cells with high mitochondrial transcript percentage likely represent cells under stress (e.g. hypoxia) which produce a lot of mitochondria, or which produce an abnormally high amount of truncated mitochondrial transcripts.
+While numbers of detected genes are summarized by Seurat automatically when creating the Seurat object (with nFeature_RNA being the number of detected genes/features; nCount_RNA being the number of detected transcripts), one needs to calculate mitochondial transcript percentages manually. Still, Seurat provides an easy solution
+
+```{r}
+#Add mitochondrial gene content (% of reads mapping to mitochondrial genes)
+# - Looks for gene names starting with "MT-" (human mitochondrial genes)
+hbca[["percent.mt"]] <- PercentageFeatureSet(hbca, pattern = "^MT-")
+
+# Show the first few rows of the metadata table (one row per cell)
+head(hbca@meta.data, 5)
+
+# Visualize quality control metrics with violin plots
+VlnPlot(hbca, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+
+```{r fig.width = 15}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+plot1 <- FeatureScatter(hbca, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(hbca, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+Please note that there is no one-size-fits-all filtering criteria, as the normal ranges of these metrics can vary dramatically from one experiment to another, depending on sample origin as well as reagents and sequencing depths. One suggestion here is to ONLY FILTER OUT OUTLIER CELLS, i.e. the minority of cells with certain QC metrics clearly above or below the majority of cells. To do that, one needs to first know how these values are distributed in the data. One can look at the distribution by creating a violin plot for each of the metrics.
+
+```{r}
+#filter data by mitochondrial gene counts
+hbca <- subset(hbca, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 20)
+```
+
+## Step 3. Normalization
+Similar to bulk RNA-seq, the amount of captured RNA is different from cell to cell, and one should therefore not directly compare the number of captured transcripts for each gene between cells. A normalization step, aiming to make gene expression levels between different cells comparable, is therefore necessary. The most commonly used normalization in scRNA-seq data analysis is very similar to the concept of TPM (Transcripts Per Million reads) - one normalizes the feature expression measurements for each cell to the total expression, and then multiplies this by a scale factor (10000 by default). At the end, the resulting expression levels are log-transformed so that the expression values better fit a normal distribution. It is worth to mention that before doing the log-transformation, one pseudocount is added to every value so that genes with zero transcripts detected in a cell still present values of zero after log-transform.
+
+```{r}
+#normalize data
+hbca <- NormalizeData(hbca, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+## Step 4. Feature selection for following heterogeneity analysis
+The biggest advantage of single-cell as compared to bulk RNA-seq is the potential to look into cellular heterogeneity of samples, by looking for cell groups with distinct molecular signatures. However, not every gene has the same level of information and the same contribution when trying to identify different cell groups. For instance, genes with low expression levels, and those with similar expression levels across all cells, are not very informative and may dilute differences between distinct cell groups. Therefore, it is necessary to perform a proper feature selection before further exploring the scRNA-seq data.
+
+In Seurat, or more general in scRNA-seq data analysis, this step usually refers to the identification of highly variable features/genes, which are genes with the most varied expression levels across cells.
+
+```{r}
+#By default, Seurat calculates the standardized variance of each gene across cells, and picks the top 2000 ones as the highly variable features. One can change the number of highly variable features easily by giving the
+hbca <- FindVariableFeatures(hbca, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(hbca), 10)
+print(top10)
+```
+
+One can visualize the result in a variable feature plot, but this is optional.
+
+```{r fig.width = 15}
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(hbca)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+## Step 5. Data scaling
+Since different genes have different base expression levels and distributions, the contribution of each gene to the analysis is different if no data transformation is performed. This is something we do not want as we don't want our analysis to only depend on genes that are highly expressed. Therefore a scaling is applied to the data using the selected features, just like one usually does in any data science field.
+```{r}
+# Linear scaling of data
+all.genes <- rownames(hbca)
+hbca <- ScaleData(hbca, features = all.genes)
+```
+
+## Step 6. Linear dimensionality reduction using principal component analysis (PCA)
+In principle one can start to look at cell heterogeneity after identifying highly variable genes and scaling the data. However, applying a linear dimension reduction before doing any further analysis is strongly recommended and sometimes even seen as compulsory. The benefit of doing such a dimension reduction includes but is not limited to:
+1. The data becomes much more compact so that computation becomes much faster.
+2. As scRNA-seq data is intrinsically sparse, summarizing measurements of related features greatly enhances the signal robustness.
+
+```{r}
+#PCA
+hbca <- RunPCA(hbca, features = VariableFeatures(object = hbca))
+
+# Examine and visualize PCA results a few different ways
+print(hbca[["pca"]], dims = 1:5, nfeatures = 5)
+
+VizDimLoadings(hbca, dims = 1:2, reduction = "pca")
+DimPlot(hbca, reduction = "pca")
+```
+
+The number of principal components (PCs) that one can calculate for a data set is equal to the number of highly variable genes or the number of cells, whichever value is smaller. However, most of these PCs are not informative and only represent random noise. Only the top PCs are informative and represent differences among cell populations. Therefore, instead of calculating all possible PCs, Seurat uses truncated PCA to only calculate the first PCs, by default the top 50 PCs. One can change that by setting the ```npcs``` parameter.
+
+Even then, one doesn't necessarily use all the calculated PCs. Determinting how many top PCs to use is an art. There is no golden standard, and everyone has his/her own understanding. The so-called elbow plot method can help with the decision. It consists of plotting the explained variation as a function of each PC, and picking the elbow of the curve as the number of PCs to use. 
+
+```{r}
+#elbow plot
+ElbowPlot(hbca)
+```
+
+Apart from making an unbiased decision, one can also check which genes are mostly contributing to each of the top PCs . This can be informative if one knows the genes and the biology of the analyzed sample. It provides the opportunity to understand the biological implication of each of the top PCs, so that one can pick those representing useful information. 
+
+```{r}
+#PCA heatmaps
+DimHeatmap(hbca, dims = 1, cells = 500, balanced = TRUE)
+DimHeatmap(hbca, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+## Step 7. Non-linear dimension reduction for visualization
+A linear dimension reduction has both pros and cons. The good side is that every PC is a linear combination of gene expression so interpretation of PCs are straightforward. Also the data is compressed but not disorted, therefore information in the data is largely remained. The bad side, on the other hand, is that one usually needs more than 10 PCs to cover most of the information. This is fine for most of the analysis, but not for visualization where it is impossible to go over three dimensions for ordinary persons.
+
+To overcome this issue, non-linear dimension reductions is introduced. The most commonly used non-linear dimension reduction methods in scRNA-seq data analysis are t-distributed Stochastic Neighbor Embedding (t-SNE) and Uniform Manifold Approximation and Projection (UMAP). Both methods try to place every sample in a low-dimensional space (2D/3D), so that distances or neighborhood relationships between different samples (here cells) in the original space are largely retained in the low-dimensional space.
+
+```{r}
+#high-dimensional reduction
+hbca <- RunUMAP(hbca, dims = 1:20)
+```
+
+## Step 8. Cluster the cells
+Doing feature plot of markers is usually a good way to start with when exploring scRNA-seq data. However, to more comprehensively understand the underlying heterogeneity in the data, it is necessary to identify cell groups with an unbiased manner. This is what clustering does. In principle, one can apply any clustering methods, including those widely used in bulk RNA-seq data analysis such as hierarchical clustering and k-means, to the scRNA-seq data. However, in practice, this is very difficult, as the sample size in scRNA-seq data is too much larger (one 10x experiment usually gives several thousands of cells). It would be extremely slow to use these methods. In addition, due to the intrinsic sparseness of scRNA-seq data, even if data is denoised by dimension reduction like PCA, differences between different cells are not as well quantitative as those of bulk RNA-seq data. Therefore, the more commonly used clustering methods in scRNA-seq data analysis is graph-based community identification algorithm. Here, graph is the mathematical concept, where there is a set of objects, and some pairs of these objects are related with each other; or in a simplified way, a network of something, and here, a network of cells.
+
+```{r}
+#GRAPH based clustering (adjust resolution parameter)
+hbca <- FindNeighbors(hbca, dims = 1:20)
+#resolutionparameter is used to control whether the major and coarsed cell groups (e.g. major cell types), or the smaller but finer cell groups are returned (e.g. cell subtypes). The commonly used resolution ranges between 0.1 and 1, and which is the best option largely depends on the aim of the analysis. Here, a high resolution parameter is used to get a finer clustering
+hbca <- FindClusters(hbca, resolution = 0.1)
+ 
+#cluster IDs of first 5 cells
+head(Idents(hbca), 5)
+
+#Next is to visualize the clustering result using the tSNE and UMAP embeddings that are generated before.
+DimPlot(hbca, reduction = "umap")
+DimPlot(hbca, reduction = "umap", label = 'TRUE')
+```
+
+
+## Step 9. Annotate cell clusters
+Clustering the cells gives a identity label to each cell, and we can assume that cells with the same label are similar to each other and therefore can be seen to be of the same cell type or cell state. The next question is which exact cell types or cell states these cell clusters are representing. This is not an easy question to answer, and usually there is no perfect answer. There are several options one can try to resolve this issue. For instance,
+1. Check the expression of canonical cell type and cell state markers in these clusters;
+2. Identify signature genes, or marker genes, of each identified cell cluster. Based on the identified cluster marker genes, one can do literature search, enrichment analysis or do experiment (or ask people around) for annotation;
+3. For each cluster, compare its gene expression profile with existing reference data.
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+hbca.markers <- FindAllMarkers(hbca, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+hbca.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+```
+
+
+```{r}
+#plots for DE genes
+VlnPlot(hbca, features = c("JCHAIN", "COL1A1"))
+
+# you can plot raw counts as well
+VlnPlot(hbca, features = c("JCHAIN", "COL1A1"), slot = "counts", log = TRUE)
+```
+
+### Markers for Breast Tissue
+
+```{r}
+library(knitr)
+
+# Create a mini example table
+df <- data.frame(celltype = c("Fibroblast", "LumHR", "LumSec", "Pericytes", "Plasma Bcells", "Endo-venous", "Myoepi", "Bcells", "Tcells"),marker_gene = c("COL1A1", "ANKRD30A", "KRT23", "RGS5", "JCHAIN", "SELE", "KRT14", "HLA-DRA", "LEPROTL1" ))
+
+# Print as a nicely formatted table in R Markdown
+kable(df)
+```
+
+
+```{r fig.width=15, fig.height=10}
+FeaturePlot(hbca, features = c("COL1A1", "ANKRD30A", "KRT23", "RGS5", "JCHAIN", "SELE", "KRT14", "HLA-DRA", "LEPROTL1" ))
+
+#plots for DE genes
+DotPlot(hbca, features = c("COL1A1", "ANKRD30A", "KRT23", "RGS5", "JCHAIN", "SELE", "KRT14", "HLA-DRA", "LEPROTL1" ))
+
+#heatmap of top marker genes
+top10 <- hbca.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(hbca, features = top10$gene) + NoLegend()
+```
+
+
+```{r}
+# assign cell type labels to clusters
+new.cluster.ids <- c("Fibroblast", "LumSec", "LumHR","Tcells" ,"Endothelial","myoepi","pericytes","Bcells","plasmaBcells","Fibroblast")
+
+names(new.cluster.ids) <- levels(hbca)
+hbca <- RenameIdents(hbca, new.cluster.ids)
+plot_manual<- DimPlot(hbca, reduction = "umap", label = TRUE, pt.size = 0.5)
+```
+
+### For each cluster, compare its gene expression profile with existing reference data.
+
+```{r}
+ref <- celldex::BlueprintEncodeData()
+singleR_input <- GetAssayData(hbca, assay = "RNA", slot = "data")
+```
+
+```{r}
+# Load singleR directory
+library(SingleR)
+
+# Run SingleR annotation function
+hpca_main_cluster <- SingleR(test = singleR_input,
+                                              ref = ref,
+                                              labels = ref$label.main,
+                                              clusters = hbca@meta.data$seurat_clusters)
+hbca$singleR_hpca_main <- hpca_main_cluster$labels[match((hbca@meta.data$seurat_clusters), rownames(hpca_main_cluster))]
+plot_automated <- DimPlot(hbca, label = TRUE, repel = TRUE, reduction = "umap", group.by = "singleR_hpca_main")
+```
+
+
+```{r fig.width = 15}
+plot_automated + plot_manual
+```
+
+```{r end_time, echo=TRUE}
+end_time <- Sys.time()
+total_time <- end_time - start_time
+print(paste("Total execution time:", total_time))
+```
+
+```{r}
+sessionInfo()
+```
+
