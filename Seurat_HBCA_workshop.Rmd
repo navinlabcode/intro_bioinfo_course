@@ -9,9 +9,8 @@ output:
 
 ```{r setup, include=FALSE} 
 # Hide explicit messages throughout notebook
-knitr::opts_knit$set(root.dir = "~/Downloads")
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
 ```
-
 
 ```{r}
 # Load package libraries
@@ -24,14 +23,16 @@ library(celldex)
 set.seed(25)
 ```
 
-
 ```{r start_time, echo=FALSE}
 start_time <- Sys.time()
 ```
+
 ## Step 1. Create a Seurat object
 
 Seurat implements a new data type which is named 'Seurat'. It allows Seurat to store all the steps and results along the whole analysis. Therefore, the first step is to read in the data and create a Seurat object. Seurat has an easy solution for data generated using the 10x Genomics platform.
 What the Read10X function does is to read in the matrix and rename its row names and col names by gene symbols and cell barcodes, respectively. Alternatively, one can do this manually, which is probably what one would do when the data is not generated using 10x.
+
+#### You will need to download the `HBCA_85` data directory [here](https://www.dropbox.com/scl/fo/92mtyq9phaf13kigz5wcg/AF3dseRvlbcpLGsS7CMGRDQ?rlkey=6k59eiy8hw1ydmhwyfm58z69o&dl=0) before running the below code.
 
 ```{r}
 hbca.data <- Read10X(data.dir = "HBCA_85")
@@ -49,6 +50,7 @@ hbca.data[c("COL1A1", "JCHAIN", "LUM"), 1:30]
 
 
 ## Step 2. Quality control
+
 After creating the Seurat object, the next step is to do quality control on the data. The most common quality control is to filter out
 Cells with too few genes detected. They usually represent cells which are not sequenced deep enough for reliable characterization.
 Cells with too many genes detected. They may represent doublets or multiplets (i.e. two or more cells in the same droplet, therefore sharing the same cell barcode).
